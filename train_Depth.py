@@ -95,8 +95,9 @@ Nx = 169
 Ny = 300
 lead = 0  # same time predictions
 
-
-# # # Load training data
+#data dimensions are (T, C, D, H, W) = (timesteps, channels, depth_levels, height, width) = (T, 4, 9, 169, 300)
+# Condition data dimensions are (T, 6, D, 169, 300)
+#Load training data
 truth_loc = "/glade/derecho/scratch/nasefi/Ocean3D/DATA_Sub/DATA_Depth_min_max/DATA_alldepths_wo_land_min_max.npy"
 cond_loc = "/glade/derecho/scratch/nasefi/Ocean3D/DATA_Sub/DATA_Depth_min_max/final_obs_normdepth_6ch_log.npy"
 
@@ -228,6 +229,8 @@ def ddpm_batch_loss_cond(model, x, c, timesteps, alphas_cumprod,
 ##############
 ## TRAINING ##
 ##############
+if train_type != "noise":
+    raise ValueError(f"Unsupported train_type: {train_type}. Only 'noise' is supported.")
 
 if True:
     printlog(f"Training {model_name}...")
@@ -237,7 +240,6 @@ if True:
     resume_path = f"{model_dir}/{model_name}_all_epochs.pth"
 
     start_epoch = 0  # default
-    global_step = 0
 
     if os.path.exists(resume_path):
         printlog(f"🔄 Found checkpoint: {resume_path} — attempting to resume...")
@@ -307,65 +309,20 @@ if True:
             xb, cb = xb.to(device, non_blocking=True), cb.to(device, non_blocking=True)
 
             batch_size_actual = xb.shape[0]
+            if ibatch <= loss_function_start_batch or loss_function_start_batch == -1:
+                loss_use = loss_function_start
+            else:
+                loss_use = loss_function
 
-            if train_type == "noise":
-                if ibatch <= loss_function_start_batch or loss_function_start_batch == -1:
-                    loss_use = loss_function_start
-                else:
-                    loss_use = loss_function
-
-                optimizer.zero_grad()
-                loss = ddpm_batch_loss_cond(model, xb, cb, timesteps, alphas_cumprod,
-                                    loss_function_start, loss_function,
-                                    loss_args_start, loss_args_end,
-                                    ibatch, loss_function_start_batch)
-        
-                loss.backward()
-                optimizer.step()
-            if ibatch == 0:
-                print("DEBUG: t raw:", t[:10])
-                print("DEBUG: t shape:", t.shape)
-                print("DEBUG: t min/max:", t.min().item(), t.max().item())
-                print("DEBUG: time embedding output shape:", model.time_mlp(t).shape)
-
-            elif train_type == "tauFull":
-                # keep your existing tauFull block unchanged, just use data_batch
-                tau0 = torch.zeros(batch_size_actual, device=device).long()
-                tau1 = torch.full((batch_size_actual,), timesteps-1, device=device).long()
-                rev_steps = timesteps
-
-                noise = torch.randn_like(xb)
-                data_noise_rev = torch.sqrt(alphas_cumprod[tau0].view(-1, 1, 1, 1)) * xb + \
-                                torch.sqrt(1 - alphas_cumprod[tau0].view(-1, 1, 1, 1)) * noise
-                data_noise = torch.sqrt(alphas_cumprod[tau1].view(-1, 1, 1, 1)) * xb + \
-                            torch.sqrt(1 - alphas_cumprod[tau1].view(-1, 1, 1, 1)) * noise
-                
-                optimizer.zero_grad()
-                x = data_noise
-                for tr in range(rev_steps):
-                    tau = tau1 - tr
-                    predicted_noise = model(x, tau)
-                    alpha_t = alphas[tau].view(-1, 1, 1, 1)
-                    alpha_bar_t = alphas_cumprod[tau].view(-1, 1, 1, 1)
-                    x = (1 / torch.sqrt(alpha_t)) * (x - (1 - alpha_t) / torch.sqrt(1 - alpha_bar_t) * predicted_noise)
-
-                    teff = torch.max(torch.ones(tau.shape, device=device), tau).long()
-                    beta_t = betas[teff].view(-1, 1, 1, 1)
-                    step_add_noise = (tau.view(-1, 1, 1, 1) > 0).int()
-                    with torch.no_grad():
-                        x = x + torch.sqrt(beta_t) * torch.randn_like(x) * step_add_noise
-
-                if ibatch < loss_function_start_batch:
-                    loss_use = loss_function_start
-                    loss = LOSS_FUNCTIONS[loss_use](x.permute(0,2,3,1), data_noise_rev.permute(0,2,3,1), **loss_args_start)
-                else:
-                    loss_use = loss_function
-                    loss = LOSS_FUNCTIONS[loss_use](x.permute(0,2,3,1), data_noise_rev.permute(0,2,3,1), **loss_args_end)
-
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            loss = ddpm_batch_loss_cond(model, xb, cb, timesteps, alphas_cumprod,
+                                loss_function_start, loss_function,
+                                loss_args_start, loss_args_end,
+                                ibatch, loss_function_start_batch)
+    
+            loss.backward()
+            optimizer.step()
             
-
             # bookkeeping (unchanged)
             loss_batch.append([ibatch, loss.item()])
             epoch_train_sum += loss.item()
@@ -484,31 +441,4 @@ if True:
             printlog(f"Early stopping at epoch {epoch+1}")
             break
         
-
-    else:
-        # Code for loading a pre-trained model (not used in current run)
-        model_name = "ddpm_arch-unet_time-2025-02-21-01-25_timesteps-1000_epochs-80_epoch-79"
-        model_loc = "/glade/derecho/scratch/llupinji/diffusion_qgm_outputs/models_ddpm_specLoss/ddpm_arch-unet_time-2025-02-21-01-25_timesteps-1000_epochs-80/ddpm_arch-unet_time-2025-02-21-01-25_timesteps-1000_epochs-80_epoch-79.pt"
-        model.load_state_dict(torch.load(model_loc))
-
-        # Load config for pre-trained model
-        config_path = "/glade/derecho/scratch/llupinji/diffusion_qgm_outputs/models_ddpm_specLoss/ddpm_arch-unet_time-2025-02-21-01-25_timesteps-1000_epochs-80/config.yml"
-        with open(config_path, 'r') as h:
-            hyperparam_dict = yaml.load(h, Loader=yaml.FullLoader)
-
-        # Extract parameters from loaded config
-        timesteps = hyperparam_dict["timesteps"]
-        beta_start = hyperparam_dict["beta_start"]
-        beta_end = hyperparam_dict["beta_end"]
-        batch_size = hyperparam_dict["batch_size"]
-        epochs = hyperparam_dict["epochs"]
-        beta_scheduler = hyperparam_dict["beta_scheduler"]
-        epochs_run = hyperparam_dict["epochs_run"]
-
-        # Initialize noise scheduler
-        if beta_scheduler == "linear":
-            betas, alphas, alphas_cumprod = linear_beta_scheduler(beta_start, beta_end, timesteps, device=device)
-        elif beta_scheduler == "cosine":
-            betas, alphas, alphas_cumprod = cosine_beta_scheduler(timesteps, device=device)
-
 
