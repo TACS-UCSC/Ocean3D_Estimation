@@ -85,6 +85,7 @@ printlog(f"Running ddpm_turb2d.py for {model_name}...")
 printlog(f"loaded ddpm_turb2d_config: {pformat(hyperparam_dict)}")
 printlog("-"*40)
 
+
 # Create model directory
 model_dir = f"{models_dir}/{model_name}"
 if not os.path.exists(model_dir):
